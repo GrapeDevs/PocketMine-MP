@@ -105,6 +105,8 @@ use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataCollection;
 use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataFlags;
 use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataProperties;
 use pocketmine\network\mcpe\protocol\types\entity\PlayerMetadataFlags;
+use pocketmine\network\mcpe\protocol\types\PlayerMovementSettings;
+use pocketmine\network\mcpe\protocol\types\PlayerMovementType;
 use pocketmine\permission\DefaultPermissionNames;
 use pocketmine\permission\DefaultPermissions;
 use pocketmine\permission\PermissibleBase;
@@ -220,6 +222,7 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer{
 
 	protected float $moveRateLimit = 10 * self::MOVES_PER_TICK;
 	protected ?float $lastMovementProcess = null;
+	protected PlayerMovementSettings $movementSettings;
 
 	protected int $inAirTicks = 0;
 	/** @var float */
@@ -278,6 +281,7 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer{
 		$this->chunkSelector = new ChunkSelector();
 
 		$this->chunkLoader = new PlayerChunkLoader($spawnLocation);
+		$this->movementSettings = new PlayerMovementSettings(PlayerMovementType::LEGACY, 0, false);
 
 		$world = $spawnLocation->getWorld();
 		//load the spawn chunk so we can see the terrain
@@ -382,6 +386,23 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer{
 
 	public function hasPlayedBefore() : bool{
 		return $this->lastPlayed - $this->firstPlayed > 1; // microtime(true) - microtime(true) may have less than one millisecond difference
+	}
+
+	/**
+	 * Should be called during the Login phase
+	 * @param int $movementType A constant in the PlayerMovementType class
+	 * @param int $rewindHistorySize Set to 0 if the movement type is not SERVER_AUTHORITATIVE_V2_REWIND
+	 * @param bool $serverAuthoritativeBlockBreaking Setting this to true is recommended
+	 */
+	public function setMovementSettings(int $movementType, int $rewindHistorySize, bool $serverAuthoritativeBlockBreaking) : void{
+		if($movementType < 0 || $movementType > 2){
+			throw new \InvalidArgumentException("Movement type must be 0-2, see PlayerMovementType constants.");
+		}
+		$this->movementSettings = new PlayerMovementSettings($movementType, $rewindHistorySize, $serverAuthoritativeBlockBreaking);
+	}
+
+	public function getMovementSettings() : PlayerMovementSettings{
+		return $this->movementSettings;
 	}
 
 	public function setAllowFlight(bool $value) : void{

@@ -72,6 +72,7 @@ use pocketmine\network\mcpe\protocol\ModalFormResponsePacket;
 use pocketmine\network\mcpe\protocol\MovePlayerPacket;
 use pocketmine\network\mcpe\protocol\NetworkStackLatencyPacket;
 use pocketmine\network\mcpe\protocol\PlayerActionPacket;
+use pocketmine\network\mcpe\protocol\PlayerAuthInputPacket;
 use pocketmine\network\mcpe\protocol\PlayerHotbarPacket;
 use pocketmine\network\mcpe\protocol\PlayerInputPacket;
 use pocketmine\network\mcpe\protocol\PlayerSkinPacket;
@@ -94,6 +95,8 @@ use pocketmine\network\mcpe\protocol\types\inventory\UseItemOnEntityTransactionD
 use pocketmine\network\mcpe\protocol\types\inventory\UseItemTransactionData;
 use pocketmine\network\mcpe\protocol\types\inventory\WindowTypes;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
+use pocketmine\network\mcpe\protocol\types\PlayerAuthInputFlags;
+use pocketmine\network\mcpe\protocol\types\PlayerMovementType;
 use pocketmine\network\PacketHandlingException;
 use pocketmine\player\Player;
 use pocketmine\utils\AssumptionFailedError;
@@ -163,6 +166,10 @@ class InGamePacketHandler extends PacketHandler{
 	}
 
 	public function handleMovePlayer(MovePlayerPacket $packet) : bool{
+		if($this->player->getMovementSettings()->getMovementType() !== PlayerMovementType::LEGACY){
+			$this->session->getLogger()->debug("Invalid movement received, received MovePlayer packet but expected PlayerAuthInput");
+			return false;
+		}
 		$rawPos = $packet->position;
 		foreach([$rawPos->x, $rawPos->y, $rawPos->z, $packet->yaw, $packet->headYaw, $packet->pitch] as $float){
 			if(is_infinite($float) || is_nan($float)){
@@ -873,6 +880,75 @@ class InGamePacketHandler extends PacketHandler{
 
 	public function handleEmote(EmotePacket $packet) : bool{
 		$this->player->emote($packet->getEmoteId());
+		return true;
+	}
+
+	public function handlePlayerAuthInput(PlayerAuthInputPacket $packet) : bool{
+		if($this->player->getMovementSettings()->getMovementType() === PlayerMovementType::LEGACY){
+			$this->session->getLogger()->debug("Invalid movement received, received PlayerAuthInput packet but expected MovePlayer");
+			return false;
+		}
+		$pos = $packet->getPosition();
+		foreach([$pos->x, $pos->y, $pos->z, $packet->getYaw(), $packet->getPitch(), $packet->getHeadYaw()] as $float){
+			if(is_infinite($float) || is_nan($float)){
+				$this->session->getLogger()->debug("Invalid movement received, contains NAN/INF components");
+				return false;
+			}
+		}
+
+		$curPos = $this->player->getLocation();
+		$newPos = $packet->getPosition()->round(4)->subtract(0, 1.62, 0);
+		$distanceSquared = $newPos->distanceSquared($this->player->getPosition());
+
+		// The packet is sent every tick so don't do anything if the player hasn't moved
+		if(($packet->getYaw() - $curPos->getYaw()) !== 0.0 || ($packet->getPitch() - $curPos->getPitch()) !== 0.0){
+			$yaw = fmod($packet->getYaw(), 360);
+			$pitch = fmod($packet->getPitch(), 360);
+			if($yaw < 0){
+				$yaw += 360;
+			}
+			$this->player->setRotation($yaw, $pitch);
+		}
+		if($distanceSquared !== 0.0){
+			if($this->forceMoveSync and $newPos->distanceSquared($curPos) > 1){ // Tolerate up to 1 block to avoid problems with client-sided physics when spawning in blocks
+				$this->session->getLogger()->debug("Got outdated pre-teleport movement, received " . $newPos . ", expected " . $curPos);
+				// Still getting movements from before teleport, ignore them
+			} else {
+				// Once we get a movement within a reasonable distance, treat it as a teleport ACK and remove position lock
+				$this->forceMoveSync = false;
+				$this->player->handleMovement($newPos);
+			}
+		}
+
+		if($packet->hasFlag(PlayerAuthInputFlags::PERFORM_ITEM_INTERACTION)){
+			$this->handleUseItemTransaction($packet->getItemInteractionData());
+		}
+		if($packet->hasFlag(PlayerAuthInputFlags::PERFORM_BLOCK_ACTIONS)){
+			foreach($packet->getBlockActions() as $blockAction){
+				$this->handlePlayerAction(PlayerActionPacket::create($this->player->getId(), $blockAction->actionType, $blockAction->blockPos, $blockAction->face));
+			}
+		}
+
+		if($packet->hasFlag(PlayerAuthInputFlags::START_SPRINTING)){
+			if(!$this->player->toggleSprint(true)){
+				$this->player->sendData([$this->player]);
+			}
+		}
+		if($packet->hasFlag(PlayerAuthInputFlags::STOP_SPRINTING)){
+			if(!$this->player->toggleSprint(false)){
+				$this->player->sendData([$this->player]);
+			}
+		}
+		if($packet->hasFlag(PlayerAuthInputFlags::START_SNEAKING)){
+			if(!$this->player->toggleSneak(true)){
+				$this->player->sendData([$this->player]);
+			}
+		}
+		if($packet->hasFlag(PlayerAuthInputFlags::STOP_SNEAKING)){
+			if(!$this->player->toggleSneak(false)){
+				$this->player->sendData([$this->player]);
+			}
+		}
 		return true;
 	}
 }
